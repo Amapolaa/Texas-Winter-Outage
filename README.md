@@ -25,10 +25,10 @@ With R code we will be working with three different datasets:
 
 # Repository Structure
 ```bash
-EDS223-HW4
+Texas-Winter-Outage
 └───README.md
 └───Rmd/Proj files    
-└─── texas_blackout.qmd # Name your qmd file a title that is representative of your analysis!
+└─── texas_outage.qmd 
 └───.gitignore
     └───data
         └───gis_osm_buildings_a_free_1.gpkg
