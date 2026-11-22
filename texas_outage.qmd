@@ -1,0 +1,395 @@
+---
+title: "Texas Winter Outage"
+subtitle: "Homework 4"
+author: "Amapola Garcia"
+date: "November 16, 2026"
+format: pdf
+execute:
+  eval: true
+  echo: true
+  warning: false
+editor_options:
+  chunk_output_type: console
+---
+
+## About
+In Feburary 2021, a major winter storm swept across the U.S. central plains, setting nationwide records for low temperatures. One of the storm's biggest impacts hit Texas, where people across the state suffered extended outages of electricity and water. It was one of the worst winter weather events in history, causing loss of life and economic impacts that will unfold over years. When disaster strikes, the flurry of political positioning and finger-pointing can make it difficult to understand what really happened.
+
+## Purpose
+In this assignment we will be identifying the impacts of these series of extreme winter storms by estimating the number of homes in the Houston metropolitan area that lost power and investigating whether or not these impacts were disproportionatley felt.
+
+## Learning outcomes
+This assignment will reinforce key concepts in geospatial analysis by practicing the following:
+
+* load vector/raster data
+* simple raster operations
+* simple vector operations
+* spatial joins
+
+## Assignment Deliverables
+For this assignment, you must produce the following:
+
+- [ ] A set of maps comparing night light intensities before and after the first two storms
+- [ ] A map of the homes in Houston that lost power
+- [ ] An estimate of the number of homes in Houston that lost power
+- [ ] A brief reflection (approx. 100 words) summarizing your results and discussing any limitations to this study
+
+To  complete the tasks of this assignment, I will break my analysis into the following key steps:
+
+- [ ] Find locations that experienced a blackout by creating a mask
+- [ ] Exclude highways from analysis
+- [ ] Identify homes that experienced blackouts by combining the locations of homes and blackouts
+
+## Data Files
+ With R code we will be working with four VIRRS night-light raster tiles from VIIRS data:
+
+* VNP46A1.A2021038.h08v05.001.2021039064328.tif: tile h08v05, collected on 2021-02-07
+
+* VNP46A1.A2021038.h08v06.001.2021039064329.tif: tile h08v06, collected on 2021-02-07
+
+* VNP46A1.A2021047.h08v05.001.2021048091106.tif: tile h08v05, collected on 2021-02-16
+
+* VNP46A1.A2021047.h08v06.001.2021048091105.tif: tile h08v06, collected on 2021-02-16
+
+## OpenStreetMap Geopackages
+1. Roads: gis_osm_roads_free_1.gpkg
+2. Houses: gis_osm_buildings_a_free_1.gpkg
+
+# Data Details
+## 1. The Setup and Prepare the data
+```{r}
+#Load all of the libraries
+library(sf)
+library(stars)
+library(tidyverse)
+library(tmap)
+library(here)
+```
+
+## Night Lights
+```{r}
+#Set the path to the folder containing the night-light raster files
+data_dir <- here::here("data","VNP46A1")
+
+#Find all TIFF files in that folder and save their file paths
+night_light_files <- list.files(
+    data_dir,
+    pattern = "\\.tif$", # looks for files ending in tif
+    full.names = TRUE, #inlcude the folder path for each file
+    ignore.case = TRUE #matches .tif
+) |> 
+    sort() #sorts ascending order
+
+#Read the two tiles collected on February 7
+night_20210207_h08v05 <- stars::read_stars(night_light_files[1])
+night_20210207_h08v06 <- stars::read_stars(night_light_files[2])
+
+#Read the two tiles collected on February 16
+night_20210216_h08v05 <- stars::read_stars(night_light_files[3])
+night_20210216_h08v06 <- stars::read_stars(night_light_files[4])
+
+```
+
+## Roads
+```{r}
+##READ_ROADS##
+#Reads the roads Geopackage only keeping highways
+highways <- sf::st_read(
+    here::here("data/VNP46A1","gis_osm_roads_free_1.gpkg"),
+    query = "SELECT * FROM gis_osm_roads_free_1 WHERE fclass='motorway'")
+
+#check how many features were read
+nrow(highways) # 6085
+
+##_CHECK_CRS_##
+#check the CRS of the highway data
+sf::st_crs(highways)
+
+##_TRANSFORM_THEM_##
+#Transform highways to the projected CRS used for Houston analysis
+highways_projected <- sf::st_transform(highways, crs = 3083)
+
+#Checking to see if transform worked
+sf::st_crs(highways_projected)
+
+```
+
+## Make a buffer
+Find areas within 200 meters of highways and exclude them from the blackout areas.
+```{r}
+ ##_MAKE_A_BUFFER_##
+#create a 200-meter zone around each other
+highways_buffer <- sf::st_buffer(highways_projected, dist = 200)
+
+#combine overlapping buffer xones into one geometry
+highways_buffer_union <- sf::st_union(highways_buffer)
+
+```
+
+## Houses
+```{r}
+#select the building  data, using the SQL query
+house_query <- 
+"SELECT * FROM gis_osm_buildings_a_free_1
+WHERE (type IS NULL AND name IS NULL)
+OR type IN ('residential', 'apartments', 'house','static_caravan', 'detached')
+"
+
+#read the geopackage for building data from OpenStreetMap
+houses <- sf::st_read(
+  here::here('data/VNP46A1/gis_osm_buildings_a_free_1.gpkg.zip'),
+  query = house_query)
+
+#match the CRS!!! (EPSG:3083)
+houses_projected <- sf::st_transform(houses,crs = 3083)
+
+#check
+names(houses)
+sf::st_crs(houses_projected)
+```
+
+#  2. Process the Data:
+## Data Merging: Combine the tiles and create the change
+```{r}
+#combine two tiles from each date into one raster for that date
+#combine them using st_mosaic
+feb_7_combined <- stars::st_mosaic(
+    night_20210207_h08v05,
+    night_20210207_h08v06
+)
+
+feb_16_combined <- stars::st_mosaic(
+    night_20210216_h08v05,
+    night_20210216_h08v06
+)
+#check 
+#feb_7_combined
+#feb_16_combined
+```
+
+## Calculate how night-lights values changed between dates
+```{r}
+#later date goes first so neg value indicates places where night-light highway decreased
+# Calculate change from February 7 to February 16
+night_light_change <- feb_16_combined - feb_7_combined
+
+# Inspect the new change raster
+night_light_change
+
+# Count cells with a drop greater than 200
+sum(night_light_change[[1]] < -200, na.rm = TRUE)
+
+#visualizer it
+#plot(night_light_change)
+```
+
+## Create the blackout mask, vectorize it, crop it, and reproject it
+find locations that experienced a blackout by creating a mask
+```{r}
+#starting with the night light change raster
+blackout_values <- night_light_change[[1]]
+
+# Set cells without a drop greater than 200 to NA
+blackout_values[
+  !is.na(blackout_values) & blackout_values >= -200
+] <- NA
+
+# Mark the remaining blackout candidate cells as 1
+blackout_values[!is.na(blackout_values)] <- 1
+
+# Create a new stars object for the blackout mask
+blackout_mask <- night_light_change
+blackout_mask[[1]] <- blackout_values
+
+# Compare qualifying cells with cells kept in the mask
+sum(night_light_change[[1]] < -200, na.rm = TRUE)
+sum(!is.na(blackout_mask[[1]]))
+
+#YAYA both match! #24846
+
+# Vectorize the mask #use st_as_sf()
+# Convert the non-NA blackout mask cells to polygons
+blackout_polygons <- sf::st_as_sf(
+  blackout_mask,
+  as_points = FALSE,
+  merge = TRUE,
+  na.rm = TRUE
+)
+# Repair any invalid polygon geometries
+blackout_polygons <- sf::st_make_valid(blackout_polygons)
+
+#check the resulting polygons
+#blackout_polygons
+
+
+#crop (subset) the blackout mask to the houston area as defined.
+ # Define the Houston bounding box in WGS 84
+houston_bbox <- sf::st_bbox(
+  c(xmin = -96.5, ymin = 29, xmax = -94.5, ymax = 30.5),
+  crs = sf::st_crs(blackout_polygons)
+)
+
+# Keeps blackout polygons within the Houston bounding box
+blackout_houston <- sf::st_crop(blackout_polygons, houston_bbox)
+
+#check the cropped extent
+#sf::st_bbox(blackout_houston)
+
+#FINAL#
+# re-project the cropped blackout dataset to ESPG:3083
+#needs same CRS as highway data
+blackout_houston_3083 <- sf::st_transform(
+    blackout_houston,
+    crs = 3083 )
+
+#check the new crs
+sf::st_crs(blackout_houston_3083)
+```
+
+## Exclude highway areas
+exclude highways from analysis
+* [ ]identify areas within 200m of all highways(use `st_union`)
+* [ ]find areas that experienced blackouts that are further than 200m from a highway
+
+```{r}
+#remove blackout areas that will overlap the highway buffer
+blackout_no_highways <- sf::st_difference(
+  blackout_houston_3083,
+  highways_buffer_union
+)
+
+#check
+sf::st_crs(blackout_no_highways)
+sf::st_bbox(blackout_no_highways)
+```
+
+## Identify affected homes
+identify homes that experienced blackouts by combining the locations of homes and blackouts
+```{r}
+
+# Stop the spatial join if the layers do not share a CRS
+if (sf::st_crs(houses_projected) != sf::st_crs(blackout_no_highways)) {
+  stop("Cannot identify affected buildings: the CRS values do not match.")
+}
+
+# Find the resid buildings that intersect with black out areas
+houses_affected <- sf::st_join( #Week 3 lab will join based on geometries that intersect
+  houses_projected,
+  blackout_no_highways,
+  join = sf::st_intersects,
+  left = FALSE #can perform inner joins by setting
+) |> 
+  dplyr::distinct(osm_id, .keep_all = TRUE) #keep one row per unique
+
+#count the affected homes
+nrow(houses_affected) # 157409
+
+# Warn if no building features intersect the blackout areas
+if (nrow(houses_affected) == 0) {
+  warning("No building features intersect the blackout areas.")
+}
+
+```
+
+## Night-light maps
+```{r}
+#| fig-width: 10
+#| fig-height: 8
+#crop both date mosaics to the Houston bounding box
+feb_7_houston <- sf::st_crop(feb_7_combined, houston_bbox)
+feb_16_houston <- sf::st_crop(feb_16_combined, houston_bbox)
+
+#find the shared brightness ranges for both dates
+#mins for both dates
+night_light_min <- min(
+  min(feb_7_houston[[1]], na.rm = TRUE),
+  min(feb_16_houston[[1]], na.rm = TRUE)
+)
+#max for both dates
+night_light_max <- max(
+  quantile(feb_7_houston[[1]], probs = 0.99, na.rm = TRUE),
+  quantile(feb_16_houston[[1]], probs = 0.99, na.rm = TRUE)
+)
+
+#combine both min and date to find the limit
+night_lights_limits <- c(night_light_min, night_light_max)
+
+#lets visualize them!!!
+
+# FEB 7 Map
+feb_7_map <- tm_shape(feb_7_houston) +
+  tm_raster(
+    col.scale = tm_scale_continuous(
+      values = "inferno",
+      limits = night_lights_limits
+    ),
+    col.legend = tm_legend(
+      title = "Night-light intensity \n(nW cm^-2 sr^-1)"
+    )
+  ) +
+  tm_title("Pre-storm: February 7, 2021") 
+
+# FEB 16 map
+feb_16_map <- tm_shape(feb_16_houston) + 
+  tm_raster(
+    col.scale = tm_scale_continuous(
+      values = "inferno",
+      limits = night_lights_limits
+    ),
+    col.legend = tm_legend(
+      title = "Night-light intensity\n(nW cm^-2 sr^-1)"
+    )
+  ) +
+  tm_title("During storm: February 16, 2021")
+ 
+
+# Display the maps side by side
+tmap_arrange(feb_7_map,feb_16_map, ncol = 2)
+
+```
+
+## Map and estimate affected homes
+
+```{r}
+#| fig-width: 10
+#| fig-height: 8
+
+# Map the filtered building over the blackout areas,with a legend, scale bar and compass
+
+tm_shape(blackout_no_highways) +
+  tm_polygons(
+    fill = "#D55E00",
+    fill_alpha = 0.4
+  ) +
+  tm_shape(houses_affected) +
+  tm_polygons(
+    fill = "#0072B2",
+    fill_alpha = 0.8
+  ) +
+  tm_add_legend(
+    type = "polygons",
+    title = "Affected areas and Building",
+    labels = c("Blackout areas", "Affected buildings"),
+    fill = c("#D55E00", "#0072B2")
+  ) +
+  tm_title("Houston buildings in potential blackout areas") +
+  tm_scalebar() +
+  tm_compass()
+
+```
+
+## Results
+
+```{r}
+# Count the affected building features
+affected_building_count <- nrow(houses_affected)
+affected_building_count
+
+```
+
+- The spatial analysis identified that the mapped residential buildings as possible as possible blackouts.
+- Areas within 200m of motorways are excluded
+- OpenStreetMap shows building footprints, but it doesn't tell us exactly how many households or people live in each building.
+
+## Reflection
+When I compared the February 7 and February 16 VIIRS maps, I noticed changes in nighttime brightness across Houston. I marked cells with a decrease of more than 200 nW cm⁻² sr⁻¹ as possible blackout areas, excluded areas within 200 meters of motorways, and found that 157,409 residential OpenStreetMap building features overlapped with these areas. This number is just an estimate, not a confirmed count of households. Some building footprints might be missing or labeled incorrectly, and one building could have more than one home. VIIRS pixels are bigger than individual homes, and looking at just two dates does not show exactly when outages happened or how long they lasted. Since I did not use demographic data, I cannot say if some groups were affected more than others.
